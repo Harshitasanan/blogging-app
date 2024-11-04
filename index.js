@@ -1,268 +1,119 @@
 const express = require('express');
-const app = express();
+const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const fs = require('fs');
-const path = require('path');
-const cors = require('cors');
+const app = express();
+const PORT = 3000;
 
-app.use(cors());
 app.use(express.json());
 
-const port = 3000;
-const JWT_SECRET = "superSecretJWTKey123!"; 
-const ADMIN_SECRET = "superAdminSecretKey456!"; 
-const userFilePath = path.join(__dirname, './users.json');
-const adminFilePath = path.join(__dirname, './admin.json');
-const blogFilePath = path.join(__dirname, './blogs.json');
-const commentFilePath = path.join(__dirname, './comments.json');
+const users = [];  // This would typically be a database
+const blogs = [];  // This would also typically be a database
 
+// Secret for JWT
+const SECRET_KEY = "superSecretJWTKey123!";
 
-let users = JSON.parse(fs.readFileSync(userFilePath, 'utf-8') || '[]');
-let admins = JSON.parse(fs.readFileSync(adminFilePath, 'utf-8') || '[]');
-let blogs = JSON.parse(fs.readFileSync(blogFilePath, 'utf-8') || '[]');
-let comments = JSON.parse(fs.readFileSync(commentFilePath, 'utf-8') || '[]');
+// Middleware for checking authentication
+const authenticateToken = (req, res, next) => {
+    const token = req.headers['authorization'];
+    if (!token) return res.sendStatus(403);
 
-
-const saveData = () => fs.writeFileSync(userFilePath, JSON.stringify(users, null, 2), 'utf-8');
-const saveAdminData = () => fs.writeFileSync(adminFilePath, JSON.stringify(admins, null, 2), 'utf-8');
-const saveBlogData = () => fs.writeFileSync(blogFilePath, JSON.stringify(blogs, null, 2), 'utf-8');
-const saveCommentData = () => fs.writeFileSync(commentFilePath, JSON.stringify(comments, null, 2), 'utf-8');
-
-
-const loadUsers = () => {
-    const data = fs.readFileSync(path.join(__dirname, 'users.json'));
-    return JSON.parse(data);
+    jwt.verify(token, SECRET_KEY, (err, user) => {
+        if (err) return res.sendStatus(403);
+        req.user = user;
+        next();
+    });
 };
 
-app.get('/', (req, res) => {
-    res.send('WELCOME TO THE BLOG APP');
-});
+// Middleware for checking roles
+const authorizeRole = (role) => {
+    return (req, res, next) => {
+        if (req.user.role !== role) {
+            return res.status(403).json({ message: 'Access forbidden' });
+        }
+        next();
+    };
+};
 
-app.post('/register', async (req, res) => {
-    console.log(req.body); 
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).send('Please provide all details');
+// Signup Endpoint
+app.post('/signup', async (req, res) => {
+    const { username, password, role } = req.body;
 
-    const existingUser = users.find(user => user.email === email);
-    const existingAdmin = admins.find(admin => admin.email === email);
-    if (existingUser || existingAdmin) return res.status(400).send('User already exists');
+    // Check for existing user
+    if (users.find(user => user.username === username)) {
+        return res.status(400).json({ message: 'User already exists' });
+    }
 
+    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
-    const id = users.length + admins.length + 1; 
 
-    
-    if (id === 1) {
-        const newAdmin = { id, email, password: hashedPassword, role: 'admin', registered: true };
-        admins.push(newAdmin);
-        saveAdminData();
-        return res.status(201).send('First user registered as admin successfully');
-    }
-
-    // For all subsequent users, register as a regular user without assigning a role
-    if (id > 1) {
-        const newUser = { id, email, password: hashedPassword, registered: true };
-        users.push(newUser);
-        saveData();
-        return res.status(201).send('User registered successfully');
-    }
+    // Create user
+    const user = { id: users.length + 1, username, password: hashedPassword, role };
+    users.push(user);
+    res.status(201).json({ message: 'User registered successfully' });
 });
 
-// Login route for users and admins
+// Login Endpoint
 app.post('/login', async (req, res) => {
-    const { email, password } = req.body;
-    let user = users.find(user => user.email === email);
-    let isAdmin = false;
+    const { username, password } = req.body;
+    const user = users.find(user => user.username === username);
 
-    if (!user) {
-        user = admins.find(admin => admin.email === email);
-        if (!user) return res.status(400).send('User not found');
-        isAdmin = true;
-    }
+    if (!user) return res.status(400).json({ message: 'User not found' });
 
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) return res.status(400).send('Invalid password');
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) return res.status(400).json({ message: 'Invalid password' });
 
-    const token = jwt.sign({ id: user.id, role: isAdmin ? 'admin' : 'user' }, JWT_SECRET, { expiresIn: '1h' });
+    // Generate JWT Token
+    const token = jwt.sign({ id: user.id, role: user.role }, SECRET_KEY, { expiresIn: '1h' });
     res.json({ token });
 });
 
+// Route to View All Blogs (Accessible by everyone)
+app.get('/blogs', (req, res) => {
+    res.json(blogs);
+});
 
-app.post('/admin/promote', async (req, res) => {
-    const { token, email } = req.body;
+// Route to Create Blog (Accessible by Registered Users)
+app.post('/blogs', authenticateToken, authorizeRole('registered'), (req, res) => {
+    const { title, content } = req.body;
+    const blog = { id: blogs.length + 1, title, content, authorId: req.user.id };
+    blogs.push(blog);
+    res.status(201).json({ message: 'Blog created successfully', blog });
+});
 
-    try {
-        const decoded = jwt.verify(token, ADMIN_SECRET);
-        const requestingAdmin = admins.find(admin => admin.id === decoded.id);
+// Route to Edit Blog (Accessible by Registered Users and Admin)
+app.put('/blogs/:id', authenticateToken, (req, res) => {
+    const blog = blogs.find(b => b.id === parseInt(req.params.id));
+    if (!blog) return res.status(404).json({ message: 'Blog not found' });
 
-        if (!requestingAdmin) return res.status(403).send('Unauthorized: Only admins can promote new admins');
-
-        const userToPromote = users.find(user => user.email === email);
-        if (!userToPromote) return res.status(404).send('User not found');
-
-        users = users.filter(user => user.email !== email);
-        admins.push(userToPromote);
-        saveData();
-        saveAdminData();
-        res.status(200).send('User promoted to admin');
-    } catch (err) {
-        res.status(403).send('Invalid token');
+    if (req.user.role === 'admin' || (req.user.role === 'registered' && blog.authorId === req.user.id)) {
+        blog.title = req.body.title || blog.title;
+        blog.content = req.body.content || blog.content;
+        res.json({ message: 'Blog updated successfully', blog });
+    } else {
+        res.status(403).json({ message: 'Access forbidden' });
     }
 });
 
-// Create a new blog (user or admin can create their own blog)
-app.post('/blog/create', (req, res) => {
-    const { token, title, content } = req.body;
+// Route to Delete Blog (Accessible by Registered Users)
+app.delete('/blogs/:id', authenticateToken, authorizeRole('registered'), (req, res) => {
+    const blogIndex = blogs.findIndex(b => b.id === parseInt(req.params.id));
+    if (blogIndex === -1) return res.status(404).json({ message: 'Blog not found' });
 
-    try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const user = users.find(u => u.id === decoded.id) || admins.find(a => a.id === decoded.id);
-        if (!user) return res.status(403).send('Unauthorized');
-
-        const newBlog = {
-            id: blogs.length + 1,
-            title,
-            content,
-            authorId: user.id
-        };
-        blogs.push(newBlog);
-        saveBlogData();
-        res.status(201).send('Blog created successfully');
-    } catch (err) {
-        res.status(403).send('Invalid token');
+    const blog = blogs[blogIndex];
+    if (blog.authorId === req.user.id) {
+        blogs.splice(blogIndex, 1);
+        res.json({ message: 'Blog deleted successfully' });
+    } else {
+        res.status(403).json({ message: 'Access forbidden' });
     }
 });
 
-
-app.put('/blog/update/:id', (req, res) => {
-    const { token, title, content } = req.body;
-    const blogId = parseInt(req.params.id, 10);
-
-    try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const user = users.find(u => u.id === decoded.id) || admins.find(a => a.id === decoded.id);
-
-        const blog = blogs.find(b => b.id === blogId);
-        if (!blog) return res.status(404).send('Blog not found');
-
-        if (blog.authorId !== decoded.id && decoded.role !== 'admin') {
-            return res.status(403).send('Unauthorized to update this blog');
-        }
-
-        blog.title = title || blog.title;
-        blog.content = content || blog.content;
-        saveBlogData();
-        res.status(200).send('Blog updated successfully');
-    } catch (err) {
-        res.status(403).send('Invalid token');
-    }
+// Route to View All Blogs as Admin
+app.get('/admin/blogs', authenticateToken, authorizeRole('admin'), (req, res) => {
+    res.json(blogs);
 });
 
-// Delete a blog
-app.delete('/blog/delete/:id', (req, res) => {
-    const { token } = req.body;
-    const blogId = parseInt(req.params.id, 10);
-
-    try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const user = users.find(u => u.id === decoded.id) || admins.find(a => a.id === decoded.id);
-
-        const blog = blogs.find(b => b.id === blogId);
-        if (!blog) return res.status(404).send('Blog not found');
-
-        if (blog.authorId !== decoded.id && decoded.role !== 'admin') {
-            return res.status(403).send('Unauthorized to delete this blog');
-        }
-
-        blogs = blogs.filter(b => b.id !== blogId);
-        saveBlogData();
-        res.status(200).send('Blog deleted successfully');
-    } catch (err) {
-        res.status(403).send('Invalid token');
-    }
-});
-
-
-app.post('/blog/:id/like', (req, res) => {
-    const { userId } = req.body; 
-    const blogId = parseInt(req.params.id, 10); 
-    const users = loadUsers();
-
-
-    const user = users.find(u => u.id.toString() === userId);
-    if (!user) {
-        return res.status(403).send('User not found or unauthorized');
-    }
-    
-
-    const blog = blogs.find(b => b.id === blogId); 
-
-    if (!blog) {
-        return res.status(404).send('Blog not found');
-    }
-
-    if (!blog.likes) {
-        blog.likes = [];
-    }
-
-    const userIndex = blog.likes.indexOf(userId); 
-
-    if (userIndex === -1) { 
-        blog.likes.push(userId); 
-        res.status(200).send('Blog liked successfully'); 
-    } else { 
-        blog.likes.splice(userIndex, 1); 
-        res.status(200).send('Blog disliked successfully'); 
-    }
-
-    saveBlogData(); 
-});
-
-
-
-app.post('/blog/:id/comment', (req, res) => {
-    console.log(req.body); 
-    const { token, comment, parentCommentId } = req.body;
-    const blogId = parseInt(req.params.id, 10);
-
-    try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const user = users.find(u => u.id === decoded.id) || admins.find(a => a.id === decoded.id);
-        if (!user) return res.status(403).send('Unauthorized');
-
-        const blog = blogs.find(b => b.id === blogId);
-        if (!blog) return res.status(404).send('Blog not found');
-
-        const newCommentId = comments.length > 0 ? comments[comments.length - 1].commentId + 1 : 1;
-        const newComment = {
-            commentId: newCommentId,
-            blogId: blogId,
-            userId: user.id,
-            comment: comment,
-            parentCommentId: parentCommentId || null, 
-            date: new Date().toISOString()
-        };
-
-        comments.push(newComment);
-        saveCommentData();
-        res.status(201).send('Comment added successfully');
-    } catch (err) {
-        res.status(403).send('Invalid token');
-    }
-});
-
-
-app.get('/blog/:id/comments', (req, res) => {
-    const blogId = parseInt(req.params.id, 10);
-    const blogComments = comments.filter(comment => comment.blogId === blogId);
-
-    if (blogComments.length === 0) return res.status(404).send('No comments found for this blog');
-    res.status(200).json(blogComments);
-});
-
-
-
-
-app.listen(port, () => {
-    console.log(Server running on port ${port});
+// Start Server
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
 });
